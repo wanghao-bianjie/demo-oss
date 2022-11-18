@@ -8,8 +8,10 @@ import (
 	osscrypto "github.com/aliyun/aliyun-oss-go-sdk/oss/crypto"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 var client *oss.Client
@@ -290,7 +292,14 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	objectKey := "0913001.txt"
+	//objectKey := "0913001.txt"
+	objectKey := time.Now().String()
+
+	filename := "1.png"
+
+	const headerMetaOriginFileName = "origin-file-name"
+
+	contentType := oss.TypeByExtension(filename)
 
 	aesKey, aesIV, err := generateAesKeyAndIV()
 	if err != nil {
@@ -320,18 +329,26 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 	opts = append(opts, oss.Meta(osscrypto.OssClientSideEncryptionStart, encryptedAesIVBase64))
 	opts = append(opts, oss.Meta(osscrypto.OssClientSideEncryptionWrapAlg, osscrypto.RsaCryptoWrap))
 	opts = append(opts, oss.Meta(osscrypto.OssClientSideEncryptionCekAlg, osscrypto.AesCtrAlgorithm))
-	opts = append(opts, oss.ContentType("text/plain"))
+	opts = append(opts, oss.ContentType(contentType))
+	opts = append(opts, oss.Meta(headerMetaOriginFileName, filename))
+
 	//opts = append(opts, oss.ContentLength(11))
 
-	signPutURL, err := bucket.SignURL(objectKey, oss.HTTPPut, 60, opts...)
+	signPutURL, err := bucket.SignURL(objectKey, oss.HTTPPut, 300, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Log("signPutURL:\t", signPutURL)
 
 	//前端上传
-	data := "15651859999"
-	t.Log("data:\t", data)
+	//data := "15651859999"
+	//t.Log("data:\t", data)
+	file, err := os.Open("./1.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileData, err := ioutil.ReadAll(file)
+
 	//1.base64解码 AES key、IV
 	aesKeyDecode, err := base64.StdEncoding.DecodeString(aesKeyBase64)
 	if err != nil {
@@ -342,7 +359,8 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	//2.AES 加密数据
-	encryptData, err := AesEncrypt([]byte(data), aesKeyDecode, aesIVDecode)
+	//encryptData, err := AesEncrypt([]byte(data), aesKeyDecode, aesIVDecode)
+	encryptData, err := AesEncrypt(fileData, aesKeyDecode, aesIVDecode)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,8 +373,9 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 	request.Header.Set(oss.HTTPHeaderOssMetaPrefix+osscrypto.OssClientSideEncryptionStart, encryptedAesIVBase64)
 	request.Header.Set(oss.HTTPHeaderOssMetaPrefix+osscrypto.OssClientSideEncryptionWrapAlg, osscrypto.RsaCryptoWrap)
 	request.Header.Set(oss.HTTPHeaderOssMetaPrefix+osscrypto.OssClientSideEncryptionCekAlg, osscrypto.AesCtrAlgorithm)
+	request.Header.Set(oss.HTTPHeaderOssMetaPrefix+headerMetaOriginFileName, filename)
 
-	request.Header.Set(oss.HTTPHeaderContentType, "text/plain")
+	request.Header.Set(oss.HTTPHeaderContentType, contentType)
 	//request.Header.Set(oss.HTTPHeaderContentLength, strconv.Itoa(len(encryptData)))
 
 	response, err := http.DefaultClient.Do(request)
@@ -394,10 +413,12 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 
 	getKeyEncryptedBase64 := getResp.Header.Get(oss.HTTPHeaderOssMetaPrefix + osscrypto.OssClientSideEncryptionKey)
 	getIVEncryptedBase64 := getResp.Header.Get(oss.HTTPHeaderOssMetaPrefix + osscrypto.OssClientSideEncryptionStart)
+	originFilename := getResp.Header.Get(oss.HTTPHeaderOssMetaPrefix + headerMetaOriginFileName)
 	t.Log("getKeyEncryptedBase64:\t", getKeyEncryptedBase64)
 	t.Log("getIVEncryptedBase64:\t", getIVEncryptedBase64)
 	t.Log("WrapAlg:\t", getResp.Header.Get(oss.HTTPHeaderOssMetaPrefix+osscrypto.OssClientSideEncryptionWrapAlg))
 	t.Log("CekAlg:\t", getResp.Header.Get(oss.HTTPHeaderOssMetaPrefix+osscrypto.OssClientSideEncryptionCekAlg))
+	t.Log("origin-filename:\t", originFilename)
 
 	getKeyEncrypted, err := base64.StdEncoding.DecodeString(getKeyEncryptedBase64)
 	if err != nil {
@@ -423,6 +444,17 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 	}
 	t.Log(string(decryptDara))
 
+	create, err := os.Create(objectKey)
+	defer create.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write, err := create.Write(decryptDara)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log(write)
+
 	//用oss sdk直接解密的结果
 	masterRsaCipher, err := osscrypto.CreateMasterRsa(nil, pubkey, prikey)
 	if err != nil {
@@ -433,14 +465,15 @@ func TestUploadAndDownloadByClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	object, err := cryptoBucket.GetObject(objectKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer object.Close()
-	res, err := ioutil.ReadAll(object)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Log("res from sdk:\t", string(res))
+	cryptoBucket.GetObjectToFile(objectKey, "./download_"+originFilename)
+	//object, err := cryptoBucket.GetObject(objectKey)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+	//defer object.Close()
+	//res, err := ioutil.ReadAll(object)
+	//if err != nil {
+	//	t.Fatal(err)
+	//}
+	//t.Log("res from sdk:\t", string(res))
 }
